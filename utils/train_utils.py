@@ -134,7 +134,7 @@ def save_used_code_files(file_paths, save_dir):
 
 
 #保存最佳模型
-def save_checkpoint(model, optimizer, epoch, save_path, scheduler=None, best_metric=None):
+def save_checkpoint(model, optimizer, epoch, save_path, scheduler=None, best_metric=None, config=None):
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -144,6 +144,9 @@ def save_checkpoint(model, optimizer, epoch, save_path, scheduler=None, best_met
 
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+
+    if config is not None:
+        checkpoint["config"] = config
 
     torch.save(checkpoint, save_path)
 

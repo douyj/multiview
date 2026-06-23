@@ -239,7 +239,7 @@ class ImageRestorer(nn.Module):
         """
         x:
             1通道: [B,1,H,W] = I_fbp
-            2通道: [B,2,H,W] = [I_fbp, U_sino_img]
+            2通道: [B,2,H,W] = [I_fbp, view_ratio_map]
 
         注意:
             主干网络 stage1 / shallow_feat2 可以吃完整 x；
@@ -250,7 +250,7 @@ class ImageRestorer(nn.Module):
         x_base = x[:, 0:1, :, :]
 
         # Stage1 主干吃完整输入 x
-        # 如果 in_c=2，这里就是 [I_fbp, U_sino_img]
+        # 如果 in_c=2，这里就是 [I_fbp, view_ratio_map]
         stage1_img, encs_feature, decs_feature = self.stage1(x)     #输出：[stage1_img粗恢复CT, encs_feature编码器多层特征, decs_feature解码器多层特征]
 
         # SAM 里的 img 分支是 1通道，所以这里只能传 x_base

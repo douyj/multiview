@@ -34,18 +34,16 @@ def ensure_dir(path):
 
 
 def parse_sino_model_output(out):
-    """
-    兼容：
-        return S_clean, U_sino
-        return {"S_clean": ..., "U_sino": ...}
-    """
     if isinstance(out, dict):
-        return out["S_clean"], out["U_sino"]
+        return out["S_clean"]
 
-    if isinstance(out, (tuple, list)) and len(out) == 2:
-        return out[0], out[1]
+    if isinstance(out, (tuple, list)):
+        return out[0]
 
-    raise RuntimeError("模型输出格式错误，需要 return S_clean, U_sino")
+    if isinstance(out, torch.Tensor):
+        return out
+
+    raise RuntimeError("模型输出格式错误，需要 return S_clean")
 
 
 def load_model_checkpoint(model, ckpt_path, device):
@@ -58,7 +56,7 @@ def load_model_checkpoint(model, ckpt_path, device):
     )
 
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
         print("权重格式: model_state_dict")
 
         if "epoch" in ckpt:
@@ -67,11 +65,11 @@ def load_model_checkpoint(model, ckpt_path, device):
             print("checkpoint best_metric:", ckpt["best_metric"])
 
     elif isinstance(ckpt, dict) and "model" in ckpt:
-        model.load_state_dict(ckpt["model"])
+        model.load_state_dict(ckpt["model"], strict=False)
         print("权重格式: model")
 
     else:
-        model.load_state_dict(ckpt)
+        model.load_state_dict(ckpt, strict=False)
         print("权重格式: pure state_dict")
 
     return model
@@ -171,7 +169,6 @@ def generate_one_view(
         "pred_refill": os.path.join(view_dir, "pred_refill_npy"),
         "sino_gt": os.path.join(view_dir, "sino_gt_npy"),
         "mask": os.path.join(view_dir, "mask_npy"),
-        "u_sino": os.path.join(view_dir, "u_sino_npy"),
         "ct_gt": os.path.join(view_dir, "ct_gt_npy"),
     }
 
@@ -194,7 +191,7 @@ def generate_one_view(
         input_interp = x[:, 0:1]
 
         out = model(x)
-        S_clean, U_sino = parse_sino_model_output(out)
+        S_clean = parse_sino_model_output(out)
 
         pred_raw = torch.clamp(S_clean, 0.0, 1.0)
 
@@ -207,7 +204,6 @@ def generate_one_view(
         refill_np = pred_refill.detach().cpu().numpy()
         gt_np = sino_gt.detach().cpu().numpy()
         mask_np = mask.detach().cpu().numpy()
-        u_np = U_sino.detach().cpu().numpy()
 
         names = meta["name"]
 
@@ -243,10 +239,6 @@ def generate_one_view(
                 mask_np[i, 0]
             )
 
-            save_numpy(
-                os.path.join(dirs["u_sino"], save_name),
-                u_np[i, 0]
-            )
 
             ct_path = find_ct_gt_path(
                 config=config,

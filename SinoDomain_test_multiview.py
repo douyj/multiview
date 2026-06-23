@@ -1,6 +1,7 @@
 import os
 import argparse
 import csv
+import glob
 
 import numpy as np
 import torch
@@ -11,6 +12,7 @@ from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from dataset_code.multiview_sino_dataset import MultiViewSinoDataset
 from model.Multiview_Sino_Net import MDPR_SinoDomain
@@ -30,28 +32,139 @@ def ensure_dir(path):
 
 
 def parse_sino_model_output(out):
-    """
-    兼容两种模型输出：
-        1. return S_clean, U_sino
-        2. return {"S_clean": xxx, "U_sino": xxx}
-    """
     if isinstance(out, dict):
-        return out["S_clean"], out["U_sino"]
+        return out["S_clean"]
 
-    if isinstance(out, (tuple, list)) and len(out) == 2:
-        return out[0], out[1]
+    if isinstance(out, (tuple, list)):
+        return out[0]
 
-    raise RuntimeError("模型输出格式错误，需要 return S_clean, U_sino")
+    if isinstance(out, torch.Tensor):
+        return out
+
+    raise RuntimeError("模型输出格式错误，需要 return S_clean")
 
 
-def load_model_checkpoint(model, ckpt_path, device):
+ALLOWED_UNEXPECTED_KEY_PREFIXES = (
+    "uncert_head.",
+)
+
+MODEL_CONFIG_KEYS = (
+    "in_channels",
+    "width",
+    "num_blocks",
+    "keep_known",
+    "norm_groups",
+)
+
+
+def extract_state_dict(ckpt):
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        return ckpt["model_state_dict"], "model_state_dict"
+
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        return ckpt["model"], "model"
+
+    return ckpt, "pure state_dict"
+
+
+def validate_loaded_keys(incompatible):
+    missing_keys = list(incompatible.missing_keys)
+    unexpected_keys = list(incompatible.unexpected_keys)
+    bad_unexpected = [
+        key for key in unexpected_keys
+        if not key.startswith(ALLOWED_UNEXPECTED_KEY_PREFIXES)
+    ]
+
+    if missing_keys or bad_unexpected:
+        lines = ["checkpoint 权重和当前模型不匹配，已停止测试。"]
+
+        if missing_keys:
+            lines.append("缺失的当前模型权重:")
+            lines.extend([f"  - {key}" for key in missing_keys[:30]])
+            if len(missing_keys) > 30:
+                lines.append(f"  ... 还有 {len(missing_keys) - 30} 个")
+
+        if bad_unexpected:
+            lines.append("非兼容的多余权重:")
+            lines.extend([f"  - {key}" for key in bad_unexpected[:30]])
+            if len(bad_unexpected) > 30:
+                lines.append(f"  ... 还有 {len(bad_unexpected) - 30} 个")
+
+        raise RuntimeError("\n".join(lines))
+
+    allowed_unexpected = [
+        key for key in unexpected_keys
+        if key.startswith(ALLOWED_UNEXPECTED_KEY_PREFIXES)
+    ]
+    if allowed_unexpected:
+        print("忽略旧 checkpoint 中已删除的不确定性分支权重:", len(allowed_unexpected))
+
+
+def find_checkpoint_config(ckpt, ckpt_path, config_path):
+    if isinstance(ckpt, dict):
+        ckpt_config = ckpt.get("config") or ckpt.get("train_config")
+        if ckpt_config is not None:
+            return ckpt_config, "checkpoint"
+
+    exp_dir = os.path.dirname(os.path.dirname(os.path.abspath(ckpt_path)))
+    yaml_candidates = sorted(
+        glob.glob(os.path.join(exp_dir, "*.yaml"))
+        + glob.glob(os.path.join(exp_dir, "*.yml"))
+    )
+
+    if not yaml_candidates:
+        return None, None
+
+    config_basename = os.path.basename(config_path)
+    matched = [p for p in yaml_candidates if os.path.basename(p) == config_basename]
+
+    if len(matched) == 1:
+        return load_config(matched[0]), matched[0]
+
+    if len(yaml_candidates) == 1:
+        return load_config(yaml_candidates[0]), yaml_candidates[0]
+
+    print("实验目录里找到多个 yaml，无法自动判断训练配置:")
+    for candidate in yaml_candidates:
+        print("  -", candidate)
+    return None, None
+
+
+def validate_checkpoint_config(ckpt_config, current_config, source):
+    if ckpt_config is None:
+        print("警告: checkpoint 或实验目录中没有找到训练配置，无法自动校验 keep_known 等模型配置。")
+        return
+
+    ckpt_model = ckpt_config.get("model", {})
+    current_model = current_config.get("model", {})
+    mismatches = []
+
+    for key in MODEL_CONFIG_KEYS:
+        if key not in ckpt_model:
+            continue
+
+        ckpt_value = ckpt_model.get(key)
+        current_value = current_model.get(key)
+
+        if ckpt_value != current_value:
+            mismatches.append((key, ckpt_value, current_value))
+
+    if mismatches:
+        lines = [
+            "测试配置和 checkpoint 训练配置不一致，已停止测试。",
+            f"训练配置来源: {source}",
+        ]
+        for key, ckpt_value, current_value in mismatches:
+            lines.append(f"  - model.{key}: checkpoint={ckpt_value}, current={current_value}")
+        raise RuntimeError("\n".join(lines))
+
+    print("checkpoint 训练配置校验通过:", source)
+
+
+def load_model_checkpoint(model, ckpt_path, device, current_config, config_path):
     """
-    兼容当前 train_utils.py 的保存格式：
-        model_state_dict
-
-    也兼容之前可能用过的：
-        model
-        纯 state_dict
+    兼容 model_state_dict / model / 纯 state_dict。
+    strict=False 只用于兼容旧 uncertainty 分支，其他权重不匹配会报错。
     """
     print("加载权重:", ckpt_path)
 
@@ -62,21 +175,20 @@ def load_model_checkpoint(model, ckpt_path, device):
         weights_only=False
     )
 
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
-        print("权重格式: model_state_dict")
+    ckpt_config, config_source = find_checkpoint_config(ckpt, ckpt_path, config_path)
+    validate_checkpoint_config(ckpt_config, current_config, config_source)
+
+    state_dict, weight_format = extract_state_dict(ckpt)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    validate_loaded_keys(incompatible)
+
+    print("权重格式:", weight_format)
+
+    if isinstance(ckpt, dict):
         if "epoch" in ckpt:
             print("checkpoint epoch:", ckpt["epoch"])
         if "best_metric" in ckpt:
             print("checkpoint best_metric:", ckpt["best_metric"])
-
-    elif isinstance(ckpt, dict) and "model" in ckpt:
-        model.load_state_dict(ckpt["model"])
-        print("权重格式: model")
-
-    else:
-        model.load_state_dict(ckpt)
-        print("权重格式: pure state_dict")
 
     return model
 
@@ -90,20 +202,17 @@ def save_sino_compare(
     pred_raw,
     pred_refill,
     sino_gt,
-    U_sino,
     save_path,
     title_prefix="",
 ):
     """
     保存:
-        Input / Raw Pred / Refill Pred / GT / U_sino / Abs Error
+        Input / Raw Pred / Refill Pred / GT / Abs Error
     """
     sparse_sino = np.clip(sparse_sino, 0.0, 1.0)
     pred_raw = np.clip(pred_raw, 0.0, 1.0)
     pred_refill = np.clip(pred_refill, 0.0, 1.0)
     sino_gt = np.clip(sino_gt, 0.0, 1.0)
-    U_sino = np.clip(U_sino, 0.0, 1.0)
-
     abs_error = np.abs(pred_refill - sino_gt)
 
     images = [
@@ -111,7 +220,6 @@ def save_sino_compare(
         pred_raw,
         pred_refill,
         sino_gt,
-        U_sino,
         abs_error,
     ]
 
@@ -120,14 +228,13 @@ def save_sino_compare(
         "Raw Pred",
         "Refill Pred",
         "GT",
-        "U_sino",
         "Abs Error",
     ]
 
-    plt.figure(figsize=(26, 5))
+    plt.figure(figsize=(22, 5))
 
     for i, (img, title) in enumerate(zip(images, titles)):
-        plt.subplot(1, 6, i + 1)
+        plt.subplot(1, 5, i + 1)
         plt.imshow(img, cmap="gray", vmin=0, vmax=1, aspect="auto")
         plt.title(title, fontsize=12)
         plt.axis("off")
@@ -254,7 +361,7 @@ def test_one_view(
         sparse_sino = x[:, 0:1]
 
         out = model(x)
-        S_clean, U_sino = parse_sino_model_output(out)
+        S_clean = parse_sino_model_output(out)
 
         pred_raw = torch.clamp(S_clean, 0.0, 1.0)
 
@@ -285,7 +392,6 @@ def test_one_view(
         raw_np = pred_raw.detach().cpu().numpy()
         refill_np = pred_refill.detach().cpu().numpy()
         gt_np = sino_gt.detach().cpu().numpy()
-        u_np = U_sino.detach().cpu().numpy()
 
         names = meta["name"]
 
@@ -297,13 +403,10 @@ def test_one_view(
             raw_i = raw_np[i, 0]
             refill_i = refill_np[i, 0]
             gt_i = gt_np[i, 0]
-            u_i = u_np[i, 0]
 
             # 这里为了 details.csv 单样本指标，复用 skimage 会更慢；
             # 简单起见，用 batch 统计为主，details 里可先不单独精确算。
             # 如果你需要每张图精确指标，后续再加 calc_single_psnr_ssim。
-            from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-
             input_psnr = peak_signal_noise_ratio(gt_i, inp_i, data_range=1.0)
             input_ssim = structural_similarity(gt_i, inp_i, data_range=1.0)
 
@@ -344,7 +447,6 @@ def test_one_view(
                     pred_raw=raw_i,
                     pred_refill=refill_i,
                     sino_gt=gt_i,
-                    U_sino=u_i,
                     save_path=save_path,
                     title_prefix=title,
                 )
@@ -359,7 +461,6 @@ def test_one_view(
                 np.save(os.path.join(sample_dir, "raw_pred.npy"), raw_i.astype(np.float32))
                 np.save(os.path.join(sample_dir, "refill_pred.npy"), refill_i.astype(np.float32))
                 np.save(os.path.join(sample_dir, "gt.npy"), gt_i.astype(np.float32))
-                np.save(os.path.join(sample_dir, "u_sino.npy"), u_i.astype(np.float32))
 
     result = {
         "view": test_view,
@@ -411,7 +512,7 @@ def main():
         "--views",
         type=str,
         default=None,
-        help="测试 view，例如 6,9,12,15,18。默认使用 config['data']['val_views']"
+        help="测试 view，例如 12,15,18,21,24。默认使用 config['data']['val_views']"
     )
 
     parser.add_argument(
@@ -426,9 +527,12 @@ def main():
     config = load_config(args.config)
 
     if args.views is not None:
-        test_views = [int(v) for v in args.views.split(",")]
+        test_views = [int(v.strip()) for v in args.views.split(",") if v.strip()]
     else:
         test_views = config["data"]["val_views"]
+
+    if not test_views:
+        raise ValueError("测试 views 为空，请检查 --views 或 config['data']['val_views']")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
@@ -441,17 +545,21 @@ def main():
         norm_groups=config["model"].get("norm_groups", 8),
     ).to(device)
 
+    print("模型配置:", config.get("model", {}))
+
     model = load_model_checkpoint(
         model=model,
         ckpt_path=args.ckpt,
         device=device,
+        current_config=config,
+        config_path=args.config,
     )
 
     if args.save_dir is not None:
         save_root = args.save_dir
     else:
         # ckpt: outputs/xxx/checkpoints/xxx.pth
-        exp_dir = os.path.dirname(os.path.dirname(args.ckpt))
+        exp_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.ckpt)))
         ckpt_name = os.path.splitext(os.path.basename(args.ckpt))[0]
         save_root = os.path.join(exp_dir, f"{args.split}_results_{ckpt_name}")
 

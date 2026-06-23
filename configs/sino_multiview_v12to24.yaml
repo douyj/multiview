@@ -22,7 +22,7 @@ model:
   in_channels: 3
   width: 32
   num_blocks: 6
-  keep_known: false
+  keep_known: true
   norm_groups: 8
 
 train:
@@ -49,8 +49,6 @@ loss:
   # 12~24 不需要强低角度加权，先温和一点
   view_loss_weight: true
   view_loss_power: 0.25
-
-  lambda_uncert: 0.0
 
 early_stopping:
   patience: 40

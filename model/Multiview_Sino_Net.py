@@ -12,13 +12,11 @@
 
     输出:
         S_clean: [B, 1, 367, 36]
-        U_sino : [B, 1, 367, 36]
 
     说明:
         1. S_clean 用于预测完整正弦图。
-        2. U_sino 是不确定性图，后续可用于图像域融合。
-        3. 默认 keep_known=False，让网络自行学习已知角度处的校正。
-        4. loss 中显式加入 known consistency，避免已知角度被改坏。
+        2. keep_known=True 时严格保留已知角度，只在未知角度预测 residual。
+        3. loss 中显式加入 known consistency，避免已知角度被改坏。
 """
 
 import torch
@@ -241,7 +239,6 @@ class MDPR_SinoDomain(nn.Module):
 
     输出:
         S_clean: [B, 1, 367, 36]
-        U_sino : [B, 1, 367, 36]
     """
     def __init__(
         self,
@@ -272,13 +269,6 @@ class MDPR_SinoDomain(nn.Module):
 
         self.clean_head = nn.Conv2d(width, 1, kernel_size=3, padding=1)
 
-        self.uncert_head = nn.Sequential(
-            nn.Conv2d(width, width, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(width, 1, kernel_size=3, padding=1),
-        )
-
-        self.uncert_act = nn.Sigmoid()
 
     def forward(self, x, return_dict=False, clamp_output=False):
         """
@@ -298,7 +288,7 @@ class MDPR_SinoDomain(nn.Module):
                 验证/测试/保存图像时可以 True。
 
         Returns:
-            S_clean, U_sino
+            S_clean
         """
         if x.dim() != 4:
             raise ValueError(
@@ -318,24 +308,18 @@ class MDPR_SinoDomain(nn.Module):
 
         residual = self.clean_head(feat)
 
-        S_clean = sparse_sino + residual
-
         if self.keep_known:
-            S_clean = S_clean * (1.0 - mask) + sparse_sino * mask
+            S_clean = sparse_sino + residual * (1.0 - mask)
+        else:
+            S_clean = sparse_sino + residual
 
         if clamp_output:
             S_clean = torch.clamp(S_clean, 0.0, 1.0)
 
-        U_sino = self.uncert_head(feat)
-        U_sino = self.uncert_act(U_sino)
-
         if return_dict:
-            return {
-                "S_clean": S_clean,
-                "U_sino": U_sino,
-            }
+            return {"S_clean": S_clean}
 
-        return S_clean, U_sino
+        return S_clean
 
 
 # =========================================================
@@ -425,57 +409,6 @@ def sino_completion_loss(
     return loss, loss_dict
 
 
-def uncertainty_supervision_loss(
-    pred,
-    target,
-    U_sino,
-    mask=None,
-    detach_error=True,
-):
-    """
-    可选的不确定性监督损失。
-
-    说明:
-        第一阶段可以先不用这个 loss。
-        等 S_clean 正弦域补全稳定后，再加入:
-            loss_total = loss_sino + 0.1 * loss_u
-
-    Args:
-        pred:
-            [B, 1, H, W]
-
-        target:
-            [B, 1, H, W]
-
-        U_sino:
-            [B, 1, H, W]
-
-        mask:
-            [B, 1, H, W] or None
-            如果传入 mask，则只监督未知角度区域的不确定性。
-
-        detach_error:
-            是否阻断 error_map 对 pred 的梯度。
-    """
-    error_map = torch.abs(pred - target)
-
-    if detach_error:
-        error_map = error_map.detach()
-
-    if mask is not None:
-        if mask.dim() == 3:
-            mask = mask.unsqueeze(1)
-        unknown = 1.0 - mask
-        error_map = error_map * unknown
-
-    max_val = error_map.amax(dim=(2, 3), keepdim=True)
-    error_map = error_map / (max_val + 1e-6)
-
-    loss_u = F.l1_loss(U_sino, error_map)
-
-    return loss_u
-
-
 # =========================================================
 # Quick Test
 # =========================================================
@@ -504,7 +437,7 @@ if __name__ == "__main__":
     target = torch.rand(2, 1, 367, 36).to(device)
     mask = x[:, 1:2, :, :]
 
-    S_clean, U_sino = model(x)
+    S_clean = model(x)
 
     loss, loss_dict = sino_completion_loss(
         pred=S_clean,
@@ -514,18 +447,8 @@ if __name__ == "__main__":
         unknown_weight=2.0,
         known_weight=1.0,
     )
-
-    loss_u = uncertainty_supervision_loss(
-        pred=S_clean,
-        target=target,
-        U_sino=U_sino,
-        mask=mask,
-    )
-
     print("device:", device)
     print("input:", x.shape)
     print("S_clean:", S_clean.shape, S_clean.min().item(), S_clean.max().item())
-    print("U_sino:", U_sino.shape, U_sino.min().item(), U_sino.max().item())
     print("loss:", loss.item())
     print("loss_dict:", loss_dict)
-    print("loss_u:", loss_u.item())

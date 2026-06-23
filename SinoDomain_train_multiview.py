@@ -13,10 +13,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from dataset_code.multiview_sino_dataset import MultiViewSinoDataset
-from model.Multiview_Sino_Net import (
-    MDPR_SinoDomain,
-    uncertainty_supervision_loss,
-)
+from model.Multiview_Sino_Net import MDPR_SinoDomain
 
 from utils.train_utils import (
     set_seed,
@@ -37,12 +34,15 @@ from utils.train_utils import (
 
 def parse_sino_model_output(out):
     if isinstance(out, dict):
-        return out["S_clean"], out["U_sino"]
+        return out["S_clean"]
 
-    if isinstance(out, (tuple, list)) and len(out) == 2:
-        return out[0], out[1]
+    if isinstance(out, (tuple, list)):
+        return out[0]
 
-    raise RuntimeError("模型输出格式错误，需要 return S_clean, U_sino")
+    if isinstance(out, torch.Tensor):
+        return out
+
+    raise RuntimeError("模型输出格式错误，需要 return S_clean")
 
 
 def get_target_views_tensor(meta, device):
@@ -123,30 +123,25 @@ def plot_sino_multiview_comparison(
     sino_gt,
     pred_raw,
     pred_refill,
-    U_sino,
     save_path,
 ):
     inp_np = sparse_sino[0, 0].detach().cpu().numpy()
     gt_np = sino_gt[0, 0].detach().cpu().numpy()
     raw_np = pred_raw[0, 0].detach().cpu().numpy()
     refill_np = pred_refill[0, 0].detach().cpu().numpy()
-    u_np = U_sino[0, 0].detach().cpu().numpy()
-
     inp_np = inp_np.clip(0.0, 1.0)
     gt_np = gt_np.clip(0.0, 1.0)
     raw_np = raw_np.clip(0.0, 1.0)
     refill_np = refill_np.clip(0.0, 1.0)
-    u_np = u_np.clip(0.0, 1.0)
-
     err_np = abs(refill_np - gt_np)
 
-    images = [inp_np, raw_np, refill_np, gt_np, u_np, err_np]
-    titles = ["Input", "Raw Pred", "Refill Pred", "GT", "U_sino", "Abs Error"]
+    images = [inp_np, raw_np, refill_np, gt_np, err_np]
+    titles = ["Input", "Raw Pred", "Refill Pred", "GT", "Abs Error"]
 
-    plt.figure(figsize=(26, 5))
+    plt.figure(figsize=(22, 5))
 
     for i, (img, title) in enumerate(zip(images, titles)):
-        plt.subplot(1, 6, i + 1)
+        plt.subplot(1, 5, i + 1)
         plt.imshow(img, cmap="gray", vmin=0, vmax=1, aspect="auto")
         plt.title(title, fontsize=12)
         plt.axis("off")
@@ -321,14 +316,11 @@ def train_one_epoch(model, train_loader, optimizer, scaler, device, config):
     full_weight = config["loss"].get("full_weight", 1.0)
     unknown_weight = config["loss"].get("unknown_weight", 2.0)
     known_weight = config["loss"].get("known_weight", 1.0)
-    lambda_uncert = config["loss"].get("lambda_uncert", 0.0)
-
     view_loss_weight = config["loss"].get("view_loss_weight", True)
     view_loss_power = config["loss"].get("view_loss_power", 0.5)
 
     total_loss = 0.0
     total_sino_loss = 0.0
-    total_uncert_loss = 0.0
 
     for x, sino_gt, mask, meta in tqdm(train_loader, desc="Train", leave=False):
         x = x.to(device, non_blocking=True)
@@ -341,7 +333,7 @@ def train_one_epoch(model, train_loader, optimizer, scaler, device, config):
 
         with torch.cuda.amp.autocast(enabled=use_amp and torch.cuda.is_available()):
             out = model(x)
-            S_clean, U_sino = parse_sino_model_output(out)
+            S_clean = parse_sino_model_output(out)
 
             loss_sino, loss_dict = weighted_sino_completion_loss(
                 pred=S_clean,
@@ -356,18 +348,7 @@ def train_one_epoch(model, train_loader, optimizer, scaler, device, config):
                 view_loss_power=view_loss_power,
             )
 
-            if lambda_uncert > 0:
-                loss_uncert = uncertainty_supervision_loss(
-                    pred=S_clean,
-                    target=sino_gt,
-                    U_sino=U_sino,
-                    mask=mask,
-                    detach_error=True,
-                )
-            else:
-                loss_uncert = torch.zeros([], device=device)
-
-            loss = loss_sino + lambda_uncert * loss_uncert
+            loss = loss_sino
 
         scaler.scale(loss).backward()
 
@@ -380,14 +361,12 @@ def train_one_epoch(model, train_loader, optimizer, scaler, device, config):
 
         total_loss += loss.item()
         total_sino_loss += loss_sino.item()
-        total_uncert_loss += loss_uncert.item()
 
     n = len(train_loader)
 
     return {
         "loss": total_loss / n,
         "sino_loss": total_sino_loss / n,
-        "uncert_loss": total_uncert_loss / n,
     }
 
 
@@ -418,7 +397,6 @@ def validate_one_view(model, loader, device, config, test_view, save_compare_pat
     last_gt = None
     last_raw = None
     last_refill = None
-    last_u = None
 
     for x, sino_gt, mask, meta in tqdm(loader, desc=f"Valid view{test_view}", leave=False):
         x = x.to(device, non_blocking=True)
@@ -429,7 +407,7 @@ def validate_one_view(model, loader, device, config, test_view, save_compare_pat
 
         with torch.cuda.amp.autocast(enabled=use_amp and torch.cuda.is_available()):
             out = model(x)
-            S_clean, U_sino = parse_sino_model_output(out)
+            S_clean = parse_sino_model_output(out)
 
             target_views_tensor = torch.ones(x.size(0), device=device).float() * float(test_view)
 
@@ -473,7 +451,6 @@ def validate_one_view(model, loader, device, config, test_view, save_compare_pat
         last_gt = sino_gt
         last_raw = pred_raw
         last_refill = pred_refill
-        last_u = U_sino
 
     n = len(loader)
 
@@ -494,7 +471,6 @@ def validate_one_view(model, loader, device, config, test_view, save_compare_pat
             sino_gt=last_gt,
             pred_raw=last_raw,
             pred_refill=last_refill,
-            U_sino=last_u,
             save_path=save_compare_path,
         )
 
@@ -679,10 +655,8 @@ def main():
         "refill_ssim": [],
     }
 
-    best_avg_psnr = 0.0
-    best_avg_ssim = 0.0
-    best_view6_ssim = 0.0
-    best_balanced_score = -1e9
+    best_main_score = -1e9
+    best_worst_view_psnr = -1e9
 
     log_path = os.path.join(exp_dir, "logs", "train_log.csv")
 
@@ -691,13 +665,16 @@ def main():
             "epoch",
             "train_loss",
             "train_sino_loss",
-            "train_uncert_loss",
             "valid_loss",
             "avg_raw_psnr",
             "avg_raw_ssim",
             "avg_refill_psnr",
             "avg_refill_ssim",
-            "balanced_score",
+            "view_weighted_psnr",
+            "view_weighted_ssim",
+            "worst_view",
+            "worst_view_psnr",
+            "main_score",
             "lr",
         ]
 
@@ -747,30 +724,36 @@ def main():
         )
 
         result_map = {r["view"]: r for r in valid_results}
-        key_view = 6 if 6 in result_map else val_views[0]
 
-        avg_refill_psnr = valid_avg["avg_refill_psnr"]
-        avg_refill_ssim = valid_avg["avg_refill_ssim"]
+        view_weight_sum = 0.0
+        weighted_psnr_sum = 0.0
+        weighted_ssim_sum = 0.0
 
-        key_view_refill_psnr = result_map[key_view]["refill_psnr"]
-        key_view_refill_ssim = result_map[key_view]["refill_ssim"]
+        for r in valid_results:
+            view_weight = 36.0 / float(r["view"])
+            view_weight_sum += view_weight
+            weighted_psnr_sum += view_weight * r["refill_psnr"]
+            weighted_ssim_sum += view_weight * r["refill_ssim"]
 
-        balanced_score = (
-            avg_refill_psnr
-            + 5.0 * avg_refill_ssim
-            + 2.0 * key_view_refill_ssim
-        )
+        view_weighted_psnr = weighted_psnr_sum / view_weight_sum
+        view_weighted_ssim = weighted_ssim_sum / view_weight_sum
+        main_score = view_weighted_psnr + 2.0 * view_weighted_ssim
+
+        worst_view_result = min(valid_results, key=lambda r: r["refill_psnr"])
+        worst_view = worst_view_result["view"]
+        worst_view_psnr = worst_view_result["refill_psnr"]
+        worst_view_ssim = worst_view_result["refill_ssim"]
 
         print(
             f"Epoch [{epoch}/{num_epochs}] | "
             f"Train Loss: {train_stat['loss']:.6f} | "
             f"Train Sino: {train_stat['sino_loss']:.6f} | "
-            f"Train U: {train_stat['uncert_loss']:.6f} | "
             f"Avg Raw PSNR: {valid_avg['avg_raw_psnr']:.4f} | "
             f"Avg Refill PSNR: {valid_avg['avg_refill_psnr']:.4f} | "
             f"Avg Refill SSIM: {valid_avg['avg_refill_ssim']:.4f} | "
-            f"View{key_view} SSIM: {key_view_refill_ssim:.4f} | "
-            f"Balanced: {balanced_score:.4f} | "
+            f"Weighted PSNR: {view_weighted_psnr:.4f} | "
+            f"Worst View{worst_view} PSNR: {worst_view_psnr:.4f} | "
+            f"Main: {main_score:.4f} | "
             f"LR: {current_lr:.2e}"
         )
 
@@ -779,13 +762,16 @@ def main():
                 epoch,
                 f"{train_stat['loss']:.6f}",
                 f"{train_stat['sino_loss']:.6f}",
-                f"{train_stat['uncert_loss']:.6f}",
                 f"{valid_avg['avg_loss']:.6f}",
                 f"{valid_avg['avg_raw_psnr']:.6f}",
                 f"{valid_avg['avg_raw_ssim']:.6f}",
                 f"{valid_avg['avg_refill_psnr']:.6f}",
                 f"{valid_avg['avg_refill_ssim']:.6f}",
-                f"{balanced_score:.6f}",
+                f"{view_weighted_psnr:.6f}",
+                f"{view_weighted_ssim:.6f}",
+                worst_view,
+                f"{worst_view_psnr:.6f}",
+                f"{main_score:.6f}",
                 f"{current_lr:.8e}",
             ]
 
@@ -811,79 +797,44 @@ def main():
         )
 
         # =====================================================
-        # 多策略保存 best 模型
+        # Checkpoint 保存策略
         # =====================================================
 
-        if avg_refill_psnr > best_avg_psnr:
-            best_avg_psnr = avg_refill_psnr
+        if main_score > best_main_score:
+            best_main_score = main_score
 
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 epoch=epoch,
-                best_metric=best_avg_psnr,
-                save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_best_psnr.pth")
+                best_metric=best_main_score,
+                save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_best_main.pth")
             )
 
             print(
-                f" ⭐ 保存 best_psnr 模型 | "
-                f"Avg Refill PSNR = {best_avg_psnr:.4f} ⭐"
+                f"⭐保存 best_main 模型 | "
+                f"Main = {best_main_score:.4f}, "
+                f"Weighted PSNR = {view_weighted_psnr:.4f}, "
+                f"Weighted SSIM = {view_weighted_ssim:.4f}"
             )
 
-        if avg_refill_ssim > best_avg_ssim:
-            best_avg_ssim = avg_refill_ssim
+        if worst_view_psnr > best_worst_view_psnr:
+            best_worst_view_psnr = worst_view_psnr
 
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 epoch=epoch,
-                best_metric=best_avg_ssim,
-                save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_best_ssim.pth")
+                best_metric=best_worst_view_psnr,
+                save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_best_worst_view.pth")
             )
 
             print(
-                f" ⭐ 保存 best_ssim 模型 | "
-                f"Avg Refill SSIM = {best_avg_ssim:.4f} ⭐"
-            )
-
-        if key_view_refill_ssim > best_view6_ssim:
-            best_view6_ssim = key_view_refill_ssim
-
-            save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                best_metric=best_view6_ssim,
-                save_path=os.path.join(exp_dir, "checkpoints", f"sino_multiview_best_view{key_view}_ssim.pth")
-            )
-
-            print(
-                f" ⭐ 保存 best_view{key_view}_ssim 模型 | "
-                f"View{key_view} Refill SSIM = {best_view6_ssim:.4f}, "
-                f"View{key_view} Refill PSNR = {key_view_refill_psnr:.4f} ⭐"
-            )
-
-        if balanced_score > best_balanced_score:
-            best_balanced_score = balanced_score
-
-            save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                best_metric=best_balanced_score,
-                save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_best_balanced.pth")
-            )
-
-            print(
-                f" ⭐ 保存 best_balanced 模型 | "
-                f"Score = {best_balanced_score:.4f}, "
-                f"Avg PSNR = {avg_refill_psnr:.4f}, "
-                f"Avg SSIM = {avg_refill_ssim:.4f}, "
-                f"View{key_view} SSIM = {key_view_refill_ssim:.4f} ⭐"
+                f"⭐保存 best_worst_view 模型 | "
+                f"Worst View{worst_view} PSNR = {best_worst_view_psnr:.4f}, "
+                f"SSIM = {worst_view_ssim:.4f}"
             )
 
         save_checkpoint(
@@ -891,19 +842,17 @@ def main():
             optimizer=optimizer,
             scheduler=scheduler,
             epoch=epoch,
-            best_metric=best_avg_psnr,
+            best_metric=main_score,
             save_path=os.path.join(exp_dir, "checkpoints", "sino_multiview_latest.pth")
         )
 
-        if early_stopper(balanced_score):
-            print(f"早停触发：连续 {early_stopper.patience} 轮 balanced_score 没有提升")
+        if early_stopper(main_score):
+            print(f"早停触发：连续 {early_stopper.patience} 轮 main_score 没有提升")
             break
 
     print("\n训练完成")
-    print("Best Avg Refill PSNR:", best_avg_psnr)
-    print("Best Avg Refill SSIM:", best_avg_ssim)
-    print(f"Best View{6 if 6 in val_views else val_views[0]} Refill SSIM:", best_view6_ssim)
-    print("Best Balanced Score:", best_balanced_score)
+    print("Best Main Score:", best_main_score)
+    print("Best Worst-view PSNR:", best_worst_view_psnr)
     print("输出目录:", exp_dir)
 
 
