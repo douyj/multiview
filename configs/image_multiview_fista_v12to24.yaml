@@ -55,7 +55,7 @@ test:
 
 code_files:
   - ImageDomain_train_multiview.py
-  - datasets/multiview_image_dataset.py
+  - dataset_code/multiview_image_dataset.py
   - model/Image_Net.py
   - utils/train_utils.py
   - utils/visual_utils.py

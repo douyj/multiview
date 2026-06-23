@@ -5,7 +5,7 @@ exp:
   exp_name: sino_domain_multiview_v12to24
 
 data:
-  root: /root/code/YJNet/data/dataset_THZ_uncert
+  root: ./dataset/THz
   sino_folder: sino_gt_npy
   ct_folder: ct_gt_npy
 
@@ -67,7 +67,7 @@ test:
 code_files:
   - SinoDomain_train_multiview.py
   - SinoDomain_test_multiview.py
-  - datasets/multiview_sino_dataset.py
+  - dataset_code/multiview_sino_dataset.py
   - model/Multiview_Sino_Net.py
   - utils/train_utils.py
   - utils/visual_utils.py

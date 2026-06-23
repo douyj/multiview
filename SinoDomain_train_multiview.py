@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 from torch.utils.data import DataLoader
 
-from datasets.multiview_sino_dataset import MultiViewSinoDataset
+from dataset_code.multiview_sino_dataset import MultiViewSinoDataset
 from model.Multiview_Sino_Net import (
     MDPR_SinoDomain,
     uncertainty_supervision_loss,
@@ -588,7 +588,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/sino_multiview_v6to18.yaml",
+        default="configs/sino_multiview_v12to24.yaml",
         help="配置文件路径"
     )
     args = parser.parse_args()

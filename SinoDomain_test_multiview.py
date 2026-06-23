@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from datasets.multiview_sino_dataset import MultiViewSinoDataset
+from dataset_code.multiview_sino_dataset import MultiViewSinoDataset
 from model.Multiview_Sino_Net import MDPR_SinoDomain
 
 from utils.train_utils import (
@@ -388,7 +388,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/sino_multiview_v6to18.yaml",
+        default="configs/sino_multiview_v12to24.yaml",
         help="配置文件路径"
     )
 

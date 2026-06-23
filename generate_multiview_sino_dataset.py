@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets.multiview_sino_dataset import MultiViewSinoDataset
+from dataset_code.multiview_sino_dataset import MultiViewSinoDataset
 from model.Multiview_Sino_Net import MDPR_SinoDomain
 from utils.train_utils import load_config
 
