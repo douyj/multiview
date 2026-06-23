@@ -1,0 +1,73 @@
+seed: 42
+
+exp:
+  root_dir: ./outputs
+  exp_name: sino_domain_multiview_v12to24
+
+data:
+  root: /root/code/YJNet/data/dataset_THZ_uncert
+  sino_folder: sino_gt_npy
+  ct_folder: ct_gt_npy
+
+  min_views: 12
+  max_views: 24
+
+  # 12~24 统一模型，轻微偏向 view12 / view15 / view18
+  train_views: [12, 12, 12, 13, 14, 15, 15, 16, 17, 18, 18, 19, 20, 21, 22, 24]
+
+  # 验证/测试角度
+  val_views: [12, 15, 18, 21, 24]
+
+model:
+  in_channels: 3
+  width: 32
+  num_blocks: 6
+  keep_known: false
+  norm_groups: 8
+
+train:
+  num_epochs: 300
+  batch_size: 8
+  num_workers: 0
+  pin_memory: true
+  amp: true
+  grad_clip: 1.0
+
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0001
+
+scheduler:
+  warmup_epochs: 5
+  min_lr: 0.000001
+
+loss:
+  full_weight: 1.0
+  unknown_weight: 2.0
+  known_weight: 1.0
+
+  # 12~24 不需要强低角度加权，先温和一点
+  view_loss_weight: true
+  view_loss_power: 0.25
+
+  lambda_uncert: 0.0
+
+early_stopping:
+  patience: 40
+  mode: max
+  min_delta: 0.0001
+
+test:
+  batch_size: 8
+  num_workers: 0
+  pin_memory: true
+  max_save_images: 10
+  save_npy: false
+
+code_files:
+  - SinoDomain_train_multiview.py
+  - SinoDomain_test_multiview.py
+  - datasets/multiview_sino_dataset.py
+  - model/Multiview_Sino_Net.py
+  - utils/train_utils.py
+  - utils/visual_utils.py

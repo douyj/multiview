@@ -1,0 +1,61 @@
+seed: 42
+
+exp:
+  root_dir: ./outputs
+  exp_name: image_multiview_fista_ours_v12to24
+
+data:
+  root: ./multiview_dataset/fista_v12to24
+  views: [12, 15, 18, 21, 24]
+
+  input_key: fista_ours_npy
+  target_key: ct_gt_npy
+
+  use_view_ratio: true
+  full_view: 36
+
+model:
+  in_c: 2
+  out_c: 1
+  stage1_width: 64
+  stage2_width: 64
+  num_cab: 4
+
+train:
+  num_epochs: 200
+  batch_size: 2
+  num_workers: 0
+  pin_memory: true
+  amp: true
+  grad_clip: 1.0
+
+optimizer:
+  lr: 0.0003
+  weight_decay: 0.0001
+
+scheduler:
+  warmup_epochs: 5
+  min_lr: 0.000001
+
+loss:
+  lambda_ssim: 0.01
+  lambda_stage1: 0.1
+
+early_stopping:
+  patience: 40
+  mode: max
+  min_delta: 0.0001
+
+test:
+  batch_size: 2
+  num_workers: 0
+  pin_memory: true
+  max_save_images: 20
+  save_npy: true
+
+code_files:
+  - ImageDomain_train_multiview.py
+  - datasets/multiview_image_dataset.py
+  - model/Image_Net.py
+  - utils/train_utils.py
+  - utils/visual_utils.py
