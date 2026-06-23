@@ -3,7 +3,7 @@
 """
 CUDA_VISIBLE_DEVICES=3 python generate_multiview_sino_dataset.py \
   --config configs/sino_multiview_v12to24.yaml \
-  --ckpt outputs/sino_domain_multiview_v12to24_20260606/checkpoints/sino_multiview_best_balanced.pth \
+  --ckpt outputs/sino_domain_multiview_v12to24_20260623/checkpoints/sino_multiview_best_main.pth \
   --out-root ./multiview_dataset/sino_v12to24 \
   --splits train,valid,test \
   --views 12,15,18,21,24 \
@@ -13,7 +13,7 @@ CUDA_VISIBLE_DEVICES=3 python generate_multiview_sino_dataset.py \
 
 import os
 import argparse
-import shutil
+import glob
 
 import numpy as np
 import torch
@@ -46,7 +46,128 @@ def parse_sino_model_output(out):
     raise RuntimeError("模型输出格式错误，需要 return S_clean")
 
 
-def load_model_checkpoint(model, ckpt_path, device):
+ALLOWED_UNEXPECTED_KEY_PREFIXES = (
+    "uncert_head.",
+)
+
+MODEL_CONFIG_KEYS = (
+    "in_channels",
+    "width",
+    "num_blocks",
+    "keep_known",
+    "norm_groups",
+)
+
+
+def extract_state_dict(ckpt):
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        return ckpt["model_state_dict"], "model_state_dict"
+
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        return ckpt["model"], "model"
+
+    return ckpt, "pure state_dict"
+
+
+def validate_loaded_keys(incompatible):
+    missing_keys = list(incompatible.missing_keys)
+    unexpected_keys = list(incompatible.unexpected_keys)
+    bad_unexpected = [
+        key for key in unexpected_keys
+        if not key.startswith(ALLOWED_UNEXPECTED_KEY_PREFIXES)
+    ]
+
+    if missing_keys or bad_unexpected:
+        lines = ["checkpoint 权重和当前模型不匹配，已停止生成。"]
+
+        if missing_keys:
+            lines.append("缺失的当前模型权重:")
+            lines.extend([f"  - {key}" for key in missing_keys[:30]])
+            if len(missing_keys) > 30:
+                lines.append(f"  ... 还有 {len(missing_keys) - 30} 个")
+
+        if bad_unexpected:
+            lines.append("非兼容的多余权重:")
+            lines.extend([f"  - {key}" for key in bad_unexpected[:30]])
+            if len(bad_unexpected) > 30:
+                lines.append(f"  ... 还有 {len(bad_unexpected) - 30} 个")
+
+        raise RuntimeError("\n".join(lines))
+
+    allowed_unexpected = [
+        key for key in unexpected_keys
+        if key.startswith(ALLOWED_UNEXPECTED_KEY_PREFIXES)
+    ]
+    if allowed_unexpected:
+        print("忽略旧 checkpoint 中已删除的不确定性分支权重:", len(allowed_unexpected))
+
+
+def find_checkpoint_config(ckpt, ckpt_path, config_path):
+    if isinstance(ckpt, dict):
+        ckpt_config = ckpt.get("config") or ckpt.get("train_config")
+        if ckpt_config is not None:
+            return ckpt_config, "checkpoint"
+
+    exp_dir = os.path.dirname(os.path.dirname(os.path.abspath(ckpt_path)))
+    yaml_candidates = sorted(
+        glob.glob(os.path.join(exp_dir, "*.yaml"))
+        + glob.glob(os.path.join(exp_dir, "*.yml"))
+    )
+
+    if not yaml_candidates:
+        return None, None
+
+    config_basename = os.path.basename(config_path)
+    matched = [p for p in yaml_candidates if os.path.basename(p) == config_basename]
+
+    if len(matched) == 1:
+        return load_config(matched[0]), matched[0]
+
+    if len(yaml_candidates) == 1:
+        return load_config(yaml_candidates[0]), yaml_candidates[0]
+
+    print("实验目录里找到多个 yaml，无法自动判断训练配置:")
+    for candidate in yaml_candidates:
+        print("  -", candidate)
+    return None, None
+
+
+def validate_checkpoint_config(ckpt_config, current_config, source):
+    if ckpt_config is None:
+        print("警告: checkpoint 或实验目录中没有找到训练配置，无法自动校验 keep_known 等模型配置。")
+        return
+
+    ckpt_model = ckpt_config.get("model", {})
+    current_model = current_config.get("model", {})
+    mismatches = []
+
+    for key in MODEL_CONFIG_KEYS:
+        if key not in ckpt_model:
+            continue
+
+        ckpt_value = ckpt_model.get(key)
+        current_value = current_model.get(key)
+
+        if ckpt_value != current_value:
+            mismatches.append((key, ckpt_value, current_value))
+
+    if mismatches:
+        lines = [
+            "生成配置和 checkpoint 训练配置不一致，已停止生成。",
+            f"训练配置来源: {source}",
+        ]
+        for key, ckpt_value, current_value in mismatches:
+            lines.append(f"  - model.{key}: checkpoint={ckpt_value}, current={current_value}")
+        raise RuntimeError("\n".join(lines))
+
+    print("checkpoint 训练配置校验通过:", source)
+
+
+def load_model_checkpoint(model, ckpt_path, device, current_config, config_path):
+    """
+    兼容 model_state_dict / model / 纯 state_dict。
+    strict=False 只用于兼容旧 uncertainty 分支，其他权重不匹配会报错。
+    """
     print("加载 checkpoint:", ckpt_path)
 
     ckpt = torch.load(
@@ -55,22 +176,20 @@ def load_model_checkpoint(model, ckpt_path, device):
         weights_only=False
     )
 
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        print("权重格式: model_state_dict")
+    ckpt_config, config_source = find_checkpoint_config(ckpt, ckpt_path, config_path)
+    validate_checkpoint_config(ckpt_config, current_config, config_source)
 
+    state_dict, weight_format = extract_state_dict(ckpt)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    validate_loaded_keys(incompatible)
+
+    print("权重格式:", weight_format)
+
+    if isinstance(ckpt, dict):
         if "epoch" in ckpt:
             print("checkpoint epoch:", ckpt["epoch"])
         if "best_metric" in ckpt:
             print("checkpoint best_metric:", ckpt["best_metric"])
-
-    elif isinstance(ckpt, dict) and "model" in ckpt:
-        model.load_state_dict(ckpt["model"], strict=False)
-        print("权重格式: model")
-
-    else:
-        model.load_state_dict(ckpt, strict=False)
-        print("权重格式: pure state_dict")
 
     return model
 
@@ -322,9 +441,14 @@ def main():
     if args.views is None:
         views = config["data"]["val_views"]
     else:
-        views = [int(v) for v in args.views.split(",")]
+        views = [int(v.strip()) for v in args.views.split(",") if v.strip()]
+
+    if not views:
+        raise ValueError("生成 views 为空，请检查 --views 或 config['data']['val_views']")
 
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
+    if not splits:
+        raise ValueError("生成 splits 为空，请检查 --splits")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
@@ -343,10 +467,14 @@ def main():
         norm_groups=config["model"].get("norm_groups", 8),
     ).to(device)
 
+    print("模型配置:", config.get("model", {}))
+
     model = load_model_checkpoint(
         model=model,
         ckpt_path=args.ckpt,
         device=device,
+        current_config=config,
+        config_path=args.config,
     )
 
     for split in splits:
