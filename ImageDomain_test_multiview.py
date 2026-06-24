@@ -1,7 +1,7 @@
 """
 CUDA_VISIBLE_DEVICES=3 python ImageDomain_test_multiview.py \
-  --config configs/image_multiview_fista_ours_v12to24.yaml \
-  --ckpt  outputs/image_multiview_fista_ours_v12to24_20260616/checkpoints/image_multiview_best_psnr.pth \
+  --config configs/image_multiview_fista_v12to24.yaml \
+  --ckpt  outputs/image_multiview_fista_ours_v12to24_20260623/checkpoints/image_multiview_best_psnr.pth \
   --split test \
   --views 12,15,18,21,24
 """
@@ -9,6 +9,7 @@ CUDA_VISIBLE_DEVICES=3 python ImageDomain_test_multiview.py \
 import os
 import csv
 import argparse
+import glob
 
 import torch
 from torch.utils.data import DataLoader
@@ -149,7 +150,118 @@ def save_compare_image(x, y, pred, meta, save_path):
 # checkpoint 加载
 # =========================================================
 
-def load_model_checkpoint(model, ckpt_path, device):
+MODEL_CONFIG_KEYS = (
+    "in_c",
+    "out_c",
+    "stage1_width",
+    "stage2_width",
+    "num_cab",
+)
+
+DATA_CONFIG_KEYS = (
+    "views",
+    "input_key",
+    "target_key",
+    "use_view_ratio",
+    "full_view",
+)
+
+
+def extract_state_dict(ckpt):
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        return ckpt["model_state_dict"], "model_state_dict"
+
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        return ckpt["model"], "model"
+
+    return ckpt, "pure state_dict"
+
+
+def find_checkpoint_config(ckpt, ckpt_path, config_path):
+    if isinstance(ckpt, dict):
+        ckpt_config = ckpt.get("config") or ckpt.get("train_config")
+        if ckpt_config is not None:
+            return ckpt_config, "checkpoint"
+
+    exp_dir = os.path.dirname(os.path.dirname(os.path.abspath(ckpt_path)))
+    yaml_candidates = sorted(
+        glob.glob(os.path.join(exp_dir, "*.yaml"))
+        + glob.glob(os.path.join(exp_dir, "*.yml"))
+    )
+
+    if not yaml_candidates:
+        return None, None
+
+    config_basename = os.path.basename(config_path)
+    matched = [p for p in yaml_candidates if os.path.basename(p) == config_basename]
+
+    if len(matched) == 1:
+        return load_config(matched[0]), matched[0]
+
+    if len(yaml_candidates) == 1:
+        return load_config(yaml_candidates[0]), yaml_candidates[0]
+
+    print("实验目录里找到多个 yaml，无法自动判断训练配置:")
+    for candidate in yaml_candidates:
+        print("  -", candidate)
+    return None, None
+
+
+def normalize_config_value(value):
+    if isinstance(value, tuple):
+        return list(value)
+
+    if isinstance(value, list):
+        return [normalize_config_value(v) for v in value]
+
+    return value
+
+
+def validate_checkpoint_config(ckpt_config, current_config, source):
+    if ckpt_config is None:
+        print("警告: checkpoint 或实验目录中没有找到训练配置，无法自动校验图像域模型和数据配置。")
+        return
+
+    mismatches = []
+    ckpt_model = ckpt_config.get("model", {})
+    current_model = current_config.get("model", {})
+
+    for key in MODEL_CONFIG_KEYS:
+        if key not in ckpt_model:
+            continue
+
+        ckpt_value = normalize_config_value(ckpt_model.get(key))
+        current_value = normalize_config_value(current_model.get(key))
+
+        if ckpt_value != current_value:
+            mismatches.append((f"model.{key}", ckpt_value, current_value))
+
+    ckpt_data = ckpt_config.get("data", {})
+    current_data = current_config.get("data", {})
+
+    for key in DATA_CONFIG_KEYS:
+        if key not in ckpt_data:
+            continue
+
+        ckpt_value = normalize_config_value(ckpt_data.get(key))
+        current_value = normalize_config_value(current_data.get(key))
+
+        if ckpt_value != current_value:
+            mismatches.append((f"data.{key}", ckpt_value, current_value))
+
+    if mismatches:
+        lines = [
+            "测试配置和 checkpoint 训练配置不一致，已停止测试。",
+            f"训练配置来源: {source}",
+        ]
+        for key, ckpt_value, current_value in mismatches:
+            lines.append(f"  - {key}: checkpoint={ckpt_value}, current={current_value}")
+        raise RuntimeError("\n".join(lines))
+
+    print("checkpoint 训练配置校验通过:", source)
+
+
+def load_model_checkpoint(model, ckpt_path, device, current_config, config_path):
     print("加载 checkpoint:", ckpt_path)
 
     ckpt = torch.load(
@@ -158,24 +270,19 @@ def load_model_checkpoint(model, ckpt_path, device):
         weights_only=False,
     )
 
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        state_dict = ckpt["model_state_dict"]
-        print("权重格式: model_state_dict")
+    ckpt_config, config_source = find_checkpoint_config(ckpt, ckpt_path, config_path)
+    validate_checkpoint_config(ckpt_config, current_config, config_source)
 
+    state_dict, weight_format = extract_state_dict(ckpt)
+    model.load_state_dict(state_dict, strict=True)
+    print("权重格式:", weight_format)
+
+    if isinstance(ckpt, dict):
         if "epoch" in ckpt:
             print("checkpoint epoch:", ckpt["epoch"])
         if "best_metric" in ckpt:
             print("checkpoint best_metric:", ckpt["best_metric"])
 
-    elif isinstance(ckpt, dict) and "model" in ckpt:
-        state_dict = ckpt["model"]
-        print("权重格式: model")
-
-    else:
-        state_dict = ckpt
-        print("权重格式: pure state_dict")
-
-    model.load_state_dict(state_dict, strict=True)
     return model
 
 
@@ -377,7 +484,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/image_multiview_fista_ours_v12to24.yaml"
+        default="configs/image_multiview_fista_v12to24.yaml"
     )
 
     parser.add_argument(
@@ -413,7 +520,10 @@ def main():
     if args.views is None:
         views = [int(v) for v in config["data"]["views"]]
     else:
-        views = [int(v) for v in args.views.split(",") if v.strip()]
+        views = [int(v.strip()) for v in args.views.split(",") if v.strip()]
+
+    if not views:
+        raise ValueError("测试 views 为空，请检查 --views 或 config['data']['views']")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
@@ -426,10 +536,15 @@ def main():
         num_cab=config["model"].get("num_cab", 6),
     ).to(device)
 
+    print("模型配置:", config.get("model", {}))
+    print("数据配置:", config.get("data", {}))
+
     model = load_model_checkpoint(
         model=model,
         ckpt_path=args.ckpt,
         device=device,
+        current_config=config,
+        config_path=args.config,
     )
 
     model.eval()
@@ -437,7 +552,7 @@ def main():
     if args.save_dir is None:
         ckpt_name = os.path.splitext(os.path.basename(args.ckpt))[0]
         save_dir = os.path.join(
-            os.path.dirname(os.path.dirname(args.ckpt)),
+            os.path.dirname(os.path.dirname(os.path.abspath(args.ckpt))),
             f"{args.split}_results_{ckpt_name}"
         )
     else:
