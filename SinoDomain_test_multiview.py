@@ -277,6 +277,9 @@ def build_test_loader(config, split, test_view, batch_size=None, num_workers=Non
         min_views=config["data"]["min_views"],
         max_views=config["data"]["max_views"],
         test_views=test_view,
+        train_sampling=config["data"].get("train_sampling", "random_group"),
+        eval_sampling=config["data"].get("eval_sampling", "fixed_group"),
+        interval_start=config["data"].get("interval_start", 0),
         use_ct=False,
     )
 

@@ -202,6 +202,14 @@ def evaluate(model, loader, device, criterion, lambda_ssim, lambda_stage1, use_a
     last_y = None
     last_pred = None
     last_meta = None
+    compare_sample_index = None
+
+    dataset = getattr(loader, "dataset", None)
+    samples = getattr(dataset, "samples", None)
+    if samples:
+        min_view = min(int(item["view"]) for item in samples)
+        min_view_indices = [i for i, item in enumerate(samples) if int(item["view"]) == min_view]
+        compare_sample_index = min_view_indices[len(min_view_indices) // 2]
 
     for x, y, meta in tqdm(loader, leave=False):
         x = x.to(device, non_blocking=True)
@@ -239,10 +247,18 @@ def evaluate(model, loader, device, criterion, lambda_ssim, lambda_stage1, use_a
 
         img_count += bs
 
-        last_x = x
-        last_y = y
-        last_pred = pred_for_metric
-        last_meta = meta
+        sample_indices = meta.get("sample_index", [])
+        if compare_sample_index is not None and hasattr(sample_indices, "detach"):
+            matches = (sample_indices.detach().cpu() == compare_sample_index).nonzero(as_tuple=False)
+            if len(matches) > 0:
+                pos = int(matches[0].item())
+                last_x = x[pos:pos + 1]
+                last_y = y[pos:pos + 1]
+                last_pred = pred_for_metric[pos:pos + 1]
+                last_meta = {
+                    "name": [meta["name"][pos]],
+                    "view": [meta["view"][pos]],
+                }
 
     metrics = {
         "loss": loss_sum / len(loader),

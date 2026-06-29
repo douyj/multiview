@@ -109,6 +109,41 @@ def fixed_group_indices_36(target_views, num_views=36, num_groups=3):
     return selected
 
 
+def fixed_interval_indices_36(target_views, num_views=36, start_index=0):
+    """
+    固定等间隔采样。
+    例如 target_views=18, start_index=0 时选 0,2,4,...,34，
+    对应 1-based 角度编号 1,3,5,...,35。
+    """
+    target_views = int(target_views)
+    start_index = int(start_index)
+
+    if target_views <= 0 or target_views > num_views:
+        raise ValueError(
+            f"target_views must be in [1, {num_views}], got {target_views}"
+        )
+
+    if num_views % target_views == 0:
+        step = num_views // target_views
+        selected = start_index + np.arange(target_views, dtype=np.int64) * step
+    else:
+        step = float(num_views) / float(target_views)
+        selected = np.floor(
+            start_index + np.arange(target_views, dtype=np.float32) * step
+        ).astype(np.int64)
+
+    selected = np.mod(selected, num_views)
+    selected = np.array(sorted(np.unique(selected)), dtype=np.int64)
+
+    if len(selected) != target_views:
+        raise RuntimeError(
+            f"fixed interval sampling produced {len(selected)} unique views, "
+            f"expected {target_views}: {selected.tolist()}"
+        )
+
+    return selected
+
+
 def interpolate_sino_by_angle(full_sino, selected_indices):
     """
     沿角度方向做线性插值，把稀疏角度补成完整 36 角度。
@@ -197,6 +232,9 @@ class MultiViewSinoDataset(Dataset):
         max_views=18,
         test_views=None,
         train_views=None,
+        train_sampling="random_group",
+        eval_sampling="fixed_group",
+        interval_start=0,
         use_ct=False,
     ):
         self.root = root
@@ -207,6 +245,9 @@ class MultiViewSinoDataset(Dataset):
         self.max_views = max_views
         self.test_views = test_views
         self.train_views = train_views
+        self.train_sampling = train_sampling
+        self.eval_sampling = eval_sampling
+        self.interval_start = interval_start
         self.use_ct = use_ct
 
         self.sino_dir = os.path.join(root, split, sino_folder)
@@ -246,21 +287,57 @@ class MultiViewSinoDataset(Dataset):
             )
 
         if self.split == "train":
-            selected, target_views, take_counts, view_ratio = grouped_random_indices_36(
-                num_views=36,
-                min_views=self.min_views,
-                max_views=self.max_views,
-                num_groups=3,
-                seed=None,
-                train_views=self.train_views,
-            )
+            sampling = self.train_sampling
+            if sampling in ("fixed_interval", "interval"):
+                target_views = (
+                    int(self.train_views[0])
+                    if self.train_views is not None and len(self.train_views) > 0
+                    else self.max_views
+                )
+                selected = fixed_interval_indices_36(
+                    target_views=target_views,
+                    num_views=36,
+                    start_index=self.interval_start,
+                )
+                take_counts = None
+                view_ratio = target_views / 36
+            elif sampling == "fixed_group":
+                target_views = (
+                    int(self.train_views[0])
+                    if self.train_views is not None and len(self.train_views) > 0
+                    else self.max_views
+                )
+                selected = fixed_group_indices_36(
+                    target_views=target_views,
+                    num_views=36,
+                    num_groups=3,
+                )
+                take_counts = None
+                view_ratio = target_views / 36
+            else:
+                selected, target_views, take_counts, view_ratio = grouped_random_indices_36(
+                    num_views=36,
+                    min_views=self.min_views,
+                    max_views=self.max_views,
+                    num_groups=3,
+                    seed=None,
+                    train_views=self.train_views,
+                )
         else:
             target_views = self.test_views if self.test_views is not None else self.max_views
-            selected = fixed_group_indices_36(
-                target_views=target_views,
-                num_views=36,
-                num_groups=3,
-            )
+            sampling = self.eval_sampling
+            if sampling in ("fixed_interval", "interval"):
+                selected = fixed_interval_indices_36(
+                    target_views=target_views,
+                    num_views=36,
+                    start_index=self.interval_start,
+                )
+            else:
+                selected = fixed_group_indices_36(
+                    target_views=target_views,
+                    num_views=36,
+                    num_groups=3,
+                )
             take_counts = None
             view_ratio = target_views / 36
 
@@ -322,6 +399,9 @@ class FixedViewSinoDataset(MultiViewSinoDataset):
             max_views=max_views,
             test_views=test_views,
             train_views=None,
+            train_sampling="fixed_group",
+            eval_sampling="fixed_group",
+            interval_start=0,
             use_ct=use_ct,
         )
         self.train_fixed_view = int(train_fixed_view)

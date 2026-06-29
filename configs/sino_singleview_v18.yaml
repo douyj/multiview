@@ -1,0 +1,74 @@
+seed: 42
+
+exp:
+  root_dir: ./outputs
+  exp_name: sino_domain_singleview_v18
+
+data:
+  root: ./dataset/THz
+  sino_folder: sino_gt_npy
+  ct_folder: ct_gt_npy
+
+  min_views: 18
+  max_views: 18
+
+  # 固定等间隔 18 个角度训练，用于和多角度统一模型做对比
+  # interval_start: 0 表示 0-based 选 0,2,4,...,34；对应 1-based 选 1,3,5,...,35
+  train_views: [18]
+  train_sampling: fixed_interval
+  eval_sampling: fixed_interval
+  interval_start: 0
+
+  # 训练阶段只用 view18 选 best；跨 view 泛化放到测试阶段做
+  val_views: [18]
+
+model:
+  in_channels: 3
+  width: 32
+  num_blocks: 6
+  keep_known: true
+  norm_groups: 8
+
+train:
+  num_epochs: 300
+  batch_size: 8
+  num_workers: 0
+  pin_memory: true
+  amp: true
+  grad_clip: 1.0
+
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0001
+
+scheduler:
+  warmup_epochs: 5
+  min_lr: 0.000001
+
+loss:
+  full_weight: 1.0
+  unknown_weight: 2.0
+  known_weight: 1.0
+
+  view_loss_weight: false
+  view_loss_power: 0.25
+
+early_stopping:
+  patience: 40
+  mode: max
+  min_delta: 0.0001
+
+test:
+  batch_size: 8
+  num_workers: 0
+  pin_memory: true
+  max_save_images: 10
+  save_npy: false
+
+code_files:
+  - SinoDomain_train_multiview.py
+  - SinoDomain_test_multiview.py
+  - dataset_code/multiview_sino_dataset.py
+  - model/Multiview_Sino_Net.py
+  - utils/train_utils.py
+  - utils/visual_utils.py

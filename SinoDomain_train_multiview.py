@@ -257,6 +257,9 @@ def build_train_loader(config):
         max_views=config["data"]["max_views"],
         test_views=None,
         train_views=config["data"].get("train_views", None),
+        train_sampling=config["data"].get("train_sampling", "random_group"),
+        eval_sampling=config["data"].get("eval_sampling", "fixed_group"),
+        interval_start=config["data"].get("interval_start", 0),
         use_ct=False,
     )
 
@@ -288,6 +291,9 @@ def build_fixed_view_loader(config, split, test_view):
         max_views=config["data"]["max_views"],
         test_views=test_view,
         train_views=None,
+        train_sampling=config["data"].get("train_sampling", "random_group"),
+        eval_sampling=config["data"].get("eval_sampling", "fixed_group"),
+        interval_start=config["data"].get("interval_start", 0),
         use_ct=False,
     )
 

@@ -130,6 +130,7 @@ class MultiViewImageDataset(Dataset):
             "filename": item["filename"],
             "view": item["view"],
             "view_ratio": item["view_ratio"],
+            "sample_index": idx,
         }
 
         return x, y, meta
